@@ -31,12 +31,14 @@ export default async function SignInPage({
   if (user) {
     redirect(returnTo)
   }
+  const status = firstValue(params.status)
 
   return (
     <AuthPage
       authAvailable={isAuthConfigured()}
       mode="sign-in"
       returnTo={returnTo}
+      status={firstValue(params.status)}
     />
   )
 }

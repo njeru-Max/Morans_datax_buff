@@ -1,4 +1,4 @@
--- Local PostgreSQL identity, authentication sessions, and scoped dashboard roles.
+﻿-- Local PostgreSQL identity, authentication sessions, and scoped dashboard roles.
 CREATE TABLE IF NOT EXISTS public.app_users (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   name text NOT NULL CHECK (char_length(name) BETWEEN 2 AND 100),
@@ -39,9 +39,30 @@ CREATE TABLE IF NOT EXISTS public.auth_login_attempts (
 );
 CREATE INDEX IF NOT EXISTS auth_login_attempts_email_time_idx ON public.auth_login_attempts (email, attempted_at DESC) WHERE succeeded = false;
 
+CREATE TABLE IF NOT EXISTS public.auth_action_tokens (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id uuid NOT NULL
+    REFERENCES public.app_users(id) ON DELETE CASCADE,
+  purpose text NOT NULL
+    CHECK (purpose IN ('email_verification', 'password_reset')),
+  token_hash text NOT NULL UNIQUE,
+  expires_at timestamptz NOT NULL,
+  used_at timestamptz,
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS auth_action_tokens_user_purpose_idx
+  ON public.auth_action_tokens (user_id, purpose, expires_at);
+
+CREATE TABLE IF NOT EXISTS public.auth_email_request_limits (
+  email_hash text PRIMARY KEY
+    CHECK (email_hash ~ '^[0-9a-f]{64}$'),
+  last_requested_at timestamptz NOT NULL DEFAULT now()
+);
+
 CREATE TABLE IF NOT EXISTS public.datax_institutions (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  owner_user_id text NOT NULL,
+  owner_user_id uuid NOT NULL REFERENCES public.app_users(id) ON DELETE RESTRICT,
   name text NOT NULL,
   slug text NOT NULL UNIQUE,
   country_code text,
@@ -63,7 +84,7 @@ CREATE TABLE IF NOT EXISTS public.datax_institution_memberships (
 CREATE TABLE IF NOT EXISTS public.datax_import_batches (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   institution_id uuid NOT NULL REFERENCES public.datax_institutions(id) ON DELETE CASCADE,
-  created_by_user_id text NOT NULL,
+  created_by_user_id uuid NOT NULL REFERENCES public.app_users(id) ON DELETE RESTRICT,
   original_filename text,
   status text NOT NULL DEFAULT 'draft' CHECK (status IN ('draft', 'validated', 'committed', 'failed')),
   period_start date,
@@ -97,7 +118,7 @@ CREATE TABLE IF NOT EXISTS public.datax_metric_records (
 
 CREATE TABLE IF NOT EXISTS public.morans_host_organizations (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  owner_user_id text NOT NULL,
+  owner_user_id uuid NOT NULL REFERENCES public.app_users(id) ON DELETE RESTRICT,
   name text NOT NULL,
   organization_type text NOT NULL CHECK (organization_type IN ('individual', 'student_club', 'university', 'company', 'ngo', 'community', 'other')),
   verification_status text NOT NULL DEFAULT 'draft' CHECK (verification_status IN ('draft', 'submitted', 'needs_information', 'approved', 'rejected', 'suspended')),
@@ -129,7 +150,7 @@ CREATE TABLE IF NOT EXISTS public.morans_hackathons (
   registration_closes_at timestamptz,
   starts_at timestamptz,
   ends_at timestamptz,
-  created_by_user_id text NOT NULL,
+  created_by_user_id uuid NOT NULL REFERENCES public.app_users(id) ON DELETE RESTRICT,
   published_at timestamptz,
   created_at timestamptz NOT NULL DEFAULT now(),
   updated_at timestamptz NOT NULL DEFAULT now(),
@@ -141,7 +162,7 @@ CREATE TABLE IF NOT EXISTS public.morans_hackathons (
 CREATE TABLE IF NOT EXISTS public.morans_applications (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   hackathon_id uuid NOT NULL REFERENCES public.morans_hackathons(id) ON DELETE CASCADE,
-  participant_user_id text NOT NULL,
+  participant_user_id uuid NOT NULL REFERENCES public.app_users(id) ON DELETE RESTRICT,
   status text NOT NULL DEFAULT 'submitted' CHECK (status IN ('draft', 'submitted', 'needs_information', 'eligible', 'accepted', 'waitlisted', 'rejected', 'withdrawn')),
   submitted_at timestamptz,
   created_at timestamptz NOT NULL DEFAULT now(),
@@ -152,7 +173,7 @@ CREATE TABLE IF NOT EXISTS public.morans_applications (
 CREATE TABLE IF NOT EXISTS public.morans_submissions (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   hackathon_id uuid NOT NULL REFERENCES public.morans_hackathons(id) ON DELETE CASCADE,
-  participant_user_id text NOT NULL,
+  participant_user_id uuid NOT NULL REFERENCES public.app_users(id) ON DELETE RESTRICT,
   title text NOT NULL,
   summary text NOT NULL DEFAULT '',
   project_url text,
@@ -179,7 +200,7 @@ CREATE TABLE IF NOT EXISTS public.morans_evaluations (
   hackathon_id uuid NOT NULL REFERENCES public.morans_hackathons(id) ON DELETE CASCADE,
   submission_id uuid NOT NULL REFERENCES public.morans_submissions(id) ON DELETE CASCADE,
   judge_user_id uuid NOT NULL
-    REFERENCES public.app_users(id) ON DELETE RESTRICT,
+     REFERENCES public.app_users(id) ON DELETE RESTRICT,
   rubric_version text NOT NULL DEFAULT 'v1',
   score numeric(7, 3) NOT NULL CHECK (score >= 0 AND score <= 100),
   feedback text NOT NULL DEFAULT '',
@@ -192,7 +213,7 @@ CREATE TABLE IF NOT EXISTS public.morans_evaluations (
 
 CREATE TABLE IF NOT EXISTS public.platform_audit_log (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  actor_user_id text NOT NULL,
+  actor_user_id uuid NOT NULL,
   module_key text NOT NULL CHECK (module_key IN ('data_x', 'morans', 'platform')),
   action text NOT NULL,
   entity_type text NOT NULL,
@@ -226,3 +247,4 @@ ALTER TABLE public.platform_audit_log ENABLE ROW LEVEL SECURITY;
 
 DROP POLICY IF EXISTS morans_published_events_read ON public.morans_hackathons;
 CREATE POLICY morans_published_events_read ON public.morans_hackathons FOR SELECT USING (status = 'published');
+

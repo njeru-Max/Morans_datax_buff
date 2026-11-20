@@ -22,6 +22,21 @@ export const appUsers = pgTable('app_users', {
   updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
 })
 
+export const authActionTokens = pgTable('auth_action_tokens', {
+  id: uuid('id').defaultRandom().primaryKey(),
+  userId: uuid('user_id')
+    .notNull()
+    .references(() => appUsers.id, { onDelete: 'cascade' }),
+  purpose: text('purpose').notNull(),
+  tokenHash: text('token_hash').notNull().unique(),
+  expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
+  usedAt: timestamp('used_at', { withTimezone: true }),
+  createdAt: timestamp('created_at', { withTimezone: true })
+    .notNull()
+    .defaultNow(),
+})
+
+
 export const appUserRoles = pgTable('app_user_roles', {
   id: uuid('id').defaultRandom().primaryKey(),
   userId: uuid('user_id').notNull().references(() => appUsers.id, { onDelete: 'cascade' }),

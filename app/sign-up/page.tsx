@@ -4,6 +4,8 @@ import { AuthPage } from '@/components/auth/auth-page'
 import { safeInternalPath } from '@/lib/auth/redirect'
 import { getCurrentUser } from '@/lib/auth/session'
 import { isAuthConfigured } from '@/lib/auth/server'
+import { isEmailDeliveryConfigured } from '@/lib/auth/email'
+
 
 export const dynamic = 'force-dynamic'
 
@@ -34,7 +36,7 @@ export default async function SignUpPage({
 
   return (
     <AuthPage
-      authAvailable={isAuthConfigured()}
+      authAvailable={isAuthConfigured() && isEmailDeliveryConfigured()}
       mode="sign-up"
       returnTo={returnTo}
     />

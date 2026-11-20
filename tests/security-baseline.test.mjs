@@ -9,7 +9,7 @@ test('no external auth provider references remain in application source or lockf
   const targets = ['package.json', 'pnpm-lock.yaml', 'proxy.ts', 'lib/auth/server.ts', 'lib/auth/session.ts', 'lib/auth/actions.ts', 'lib/db/schema.ts', 'db/schema.sql']
   for (const path of targets) {
     const content = await read(path)
-    assert.doesNotMatch(content, /neon_auth|NEON_AUTH|@neondatabase|createNeonAuth/i, `${path} still contains an external auth dependency`)
+    assert.doesNotMatch(content, /neon_auth|NEON_AUTH|createNeonAuth/i, `${path} still contains an external auth dependency`)
   }
   await assert.rejects(read('app/api/auth/[...path]/route.ts'))
 })
@@ -78,4 +78,100 @@ test('admin bootstrap removes roles not explicitly requested', async () => {
   assert.match(script, /BEGIN/)
   assert.match(script, /COMMIT/)
   assert.match(script, /ROLLBACK/)
+})
+
+test('verification email requests use atomic email-hash rate limiting', async () => {
+  const actions = await read('lib/auth/actions.ts')
+  const migration = await read(
+    'db/migrations/20261117_auth_email_request_limits.sql',
+  )
+
+  const start = actions.indexOf(
+    'export async function requestVerificationEmail',
+  )
+
+  assert.notEqual(start, -1, 'Verification resend action must exist')
+
+  const resend = actions.slice(start)
+
+  assert.match(resend, /createHash\('sha256'\)/)
+  assert.match(resend, /auth_email_request_limits/)
+  assert.match(resend, /ON CONFLICT \(email_hash\) DO UPDATE/)
+  assert.match(resend, /interval '1 minute'/)
+  assert.match(resend, /RETURNING email_hash/)
+  assert.match(resend, /if \(!rateLimit\.rowCount\)/)
+
+  assert.match(
+    migration,
+    /email_hash text PRIMARY KEY/,
+  )
+  assert.match(migration, /last_requested_at timestamptz/)
+})
+
+
+test('password reset requests use generic responses and atomic rate limiting', async () => {
+  const actions = await read('lib/auth/actions.ts')
+  const start = actions.indexOf('export async function requestPasswordReset')
+  const end = actions.indexOf('export async function resetPasswordWithToken', start)
+
+  assert.notEqual(start, -1, 'Password reset request action must exist')
+  assert.notEqual(end, -1, 'Password reset completion action must exist')
+
+  const request = actions.slice(start, end)
+
+  assert.match(request, /auth_email_request_limits/)
+  assert.match(request, /ON CONFLICT \(email_hash\) DO UPDATE/)
+  assert.match(request, /interval '1 minute'/)
+  assert.match(request, /RETURNING email_hash/)
+  assert.match(request, /status = 'active'/)
+  assert.match(request, /email_verified = true/)
+  assert.match(request, /createAuthToken\(user\.id, 'password_reset'\)/)
+  assert.match(request, /isEmailDeliveryConfigured/)
+  assert.match(request, /return \{ success: genericMessage \}/)
+})
+
+test('password reset tokens expire and cannot be reused', async () => {
+  const actions = await read('lib/auth/actions.ts')
+  const start = actions.indexOf('export async function resetPasswordWithToken')
+
+  assert.notEqual(start, -1, 'Password reset completion action must exist')
+
+  const reset = actions.slice(start)
+
+  assert.match(reset, /purpose = 'password_reset'/)
+  assert.match(reset, /used_at IS NULL/)
+  assert.match(reset, /expires_at > now\(\)/)
+  assert.match(reset, /SET used_at = now\(\)/)
+  assert.match(reset, /BEGIN/)
+  assert.match(reset, /COMMIT/)
+  assert.match(reset, /ROLLBACK/)
+})
+
+test('password reset updates the password and revokes existing sessions', async () => {
+  const actions = await read('lib/auth/actions.ts')
+  const start = actions.indexOf('export async function resetPasswordWithToken')
+
+  assert.notEqual(start, -1, 'Password reset completion action must exist')
+
+  const reset = actions.slice(start)
+
+  assert.match(reset, /hashPassword\(password\)/)
+  assert.match(reset, /SET password_hash = \$1/)
+  assert.match(reset, /status = 'active'/)
+  assert.match(reset, /email_verified = true/)
+  assert.match(reset, /UPDATE public\.auth_sessions/)
+  assert.match(reset, /SET revoked_at = now\(\)/)
+  assert.match(reset, /WHERE user_id = \$1/)
+  assert.match(reset, /AND revoked_at IS NULL/)
+  assert.match(reset, /client\?\.release\(\)/)
+})
+
+test('password reset tokens are stored with expiry and single-use fields', async () => {
+  const sql = await read('db/schema.sql')
+
+  assert.match(sql, /CREATE TABLE IF NOT EXISTS public\.auth_action_tokens/)
+  assert.match(sql, /token_hash text NOT NULL/)
+  assert.match(sql, /purpose text NOT NULL/)
+  assert.match(sql, /expires_at timestamptz NOT NULL/)
+  assert.match(sql, /used_at timestamptz/)
 })

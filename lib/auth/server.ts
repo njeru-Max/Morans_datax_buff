@@ -90,7 +90,7 @@ export async function getSessionUser(): Promise<SessionUser | null> {
          FROM public.auth_sessions s
          JOIN public.app_users u ON u.id = s.user_id
          LEFT JOIN public.app_user_roles r ON r.user_id = u.id
-        WHERE s.token_hash = $1 AND s.revoked_at IS NULL AND s.expires_at > now() AND u.status = 'active'
+        WHERE s.token_hash = $1 AND s.revoked_at IS NULL AND s.expires_at > now() AND u.status = 'active' AND u.email_verified = true
         GROUP BY u.id LIMIT 1`,
       [hashSessionToken(token)],
     )

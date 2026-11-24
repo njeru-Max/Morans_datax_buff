@@ -1,11 +1,9 @@
-
 module.exports = {
   apps: [
     {
       name: "morans-datax-buff",
-      cwd: "/home/server/Apis/morans-datax-buff",
-      script: "node_modules/next/dist/bin/next",
-      args: "start --hostname 127.0.0.1 --port 3010",
+      cwd: "/home/server/Apis/morans-datax-buff/current",
+      script: "server.js",
       instances: 1,
       exec_mode: "fork",
       autorestart: true,
@@ -13,6 +11,8 @@ module.exports = {
       max_restarts: 10,
       env: {
         NODE_ENV: "production",
+        HOSTNAME: "127.0.0.1",
+        PORT: "3010",
       },
     },
   ],

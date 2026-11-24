@@ -1,0 +1,262 @@
+
+name: Deploy MORANS Data X
+
+on:
+  push:
+    branches:
+      - master
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: morans-production
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Validate and build
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 12.3.4
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Run tests
+        run: pnpm test
+
+      - name: Build production application
+        run: pnpm build
+
+      - name: Package standalone application
+        run: |
+          test -f .next/standalone/server.js
+
+          mkdir -p deploy/.next
+
+          cp -a .next/standalone/. deploy/
+          cp -a .next/static deploy/.next/static
+
+          if [ -d public ]; then
+            cp -a public deploy/public
+          fi
+
+          cp ecosystem.config.cjs deploy/
+
+          tar -czf morans-deploy.tar.gz -C deploy .
+
+      - name: Upload production artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: morans-production
+          path: morans-deploy.tar.gz
+          retention-days: 3
+
+  deploy:
+    name: Deploy to Debian
+    runs-on: ubuntu-latest
+    needs: build
+    timeout-minutes: 15
+
+    permissions:
+      contents: read
+      id-token: write
+
+    if: github.ref == 'refs/heads/master'
+
+    steps:
+      - name: Download production artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: morans-production
+
+      - name: Connect to Tailscale
+        uses: tailscale/github-action@v4
+        with:
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          audience: ${{ secrets.TS_AUDIENCE }}
+          tags: tag:ci
+
+      - name: Configure SSH
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          SSH_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+        run: |
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+
+          printf '%s\n' "$SSH_PRIVATE_KEY" > ~/.ssh/deploy_key
+          printf '%s\n' "$SSH_KNOWN_HOSTS" > ~/.ssh/known_hosts
+
+          chmod 600 ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/known_hosts
+
+      - name: Transfer production build
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          DEPLOY_PORT: ${{ secrets.DEPLOY_PORT }}
+          DEPLOY_SHA: ${{ github.sha }}
+        run: |
+          scp \
+            -i ~/.ssh/deploy_key \
+            -P "$DEPLOY_PORT" \
+            -o StrictHostKeyChecking=yes \
+            morans-deploy.tar.gz \
+            "$DEPLOY_USER@$DEPLOY_HOST:/tmp/morans-$DEPLOY_SHA.tar.gz"
+
+      - name: Activate production build
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          DEPLOY_PORT: ${{ secrets.DEPLOY_PORT }}
+          DEPLOY_SHA: ${{ github.sha }}
+        run: |
+          ssh \
+            -i ~/.ssh/deploy_key \
+            -p "$DEPLOY_PORT" \
+            -o StrictHostKeyChecking=yes \
+            "$DEPLOY_USER@$DEPLOY_HOST" \
+            "DEPLOY_SHA='$DEPLOY_SHA' bash -s" <<'REMOTE'
+
+          set -Eeuo pipefail
+
+          APP_DIR="/home/server/Apis/morans-datax-buff"
+          RELEASES="$APP_DIR/releases"
+          SHARED="$APP_DIR/shared"
+          RELEASE="$RELEASES/$DEPLOY_SHA"
+          ARCHIVE="/tmp/morans-$DEPLOY_SHA.tar.gz"
+
+          STAGE=$(mktemp -d)
+          OLD_CONFIG="$STAGE/ecosystem.config.previous.cjs"
+
+          cleanup() {
+            rm -rf "$STAGE"
+            rm -f "$ARCHIVE"
+          }
+          trap cleanup EXIT
+
+          mkdir -p "$RELEASES" "$SHARED"
+
+          # Back up the existing PM2 configuration.
+          if [ -f "$APP_DIR/ecosystem.config.cjs" ]; then
+            cp "$APP_DIR/ecosystem.config.cjs" "$OLD_CONFIG"
+          fi
+
+          # Preserve the existing production environment.
+          if [ -f "$APP_DIR/.env.local" ] && [ ! -f "$SHARED/.env.local" ]; then
+            mv "$APP_DIR/.env.local" "$SHARED/.env.local"
+          fi
+
+          test -f "$SHARED/.env.local" || {
+            echo "Production environment file missing"
+            exit 1
+          }
+
+          # Keep the original environment path available.
+          ln -sfn "$SHARED/.env.local" "$APP_DIR/.env.local"
+
+          # Extract and validate the new build.
+          test -f "$ARCHIVE"
+          tar -xzf "$ARCHIVE" -C "$STAGE"
+
+          test -f "$STAGE/server.js"
+          test -d "$STAGE/.next/static"
+          test -f "$STAGE/ecosystem.config.cjs"
+
+          # Prepare the release.
+          mkdir -p "$RELEASE"
+          cp -a "$STAGE/." "$RELEASE/"
+
+          ln -sfn "$SHARED/.env.local" "$RELEASE/.env.local"
+
+          # Remember the currently active release.
+          PREVIOUS=$(readlink "$APP_DIR/current" || true)
+
+          # Install the new PM2 configuration.
+          cp "$RELEASE/ecosystem.config.cjs" "$APP_DIR/ecosystem.config.cjs"
+
+          # Atomically activate the new release.
+          ln -sfn "$RELEASE" "$APP_DIR/current.new"
+          mv -Tf "$APP_DIR/current.new" "$APP_DIR/current"
+
+          rollback() {
+            echo "Deployment failed. Restoring previous version."
+
+            if [ -n "$PREVIOUS" ]; then
+              ln -sfn "$PREVIOUS" "$APP_DIR/current.new"
+              mv -Tf "$APP_DIR/current.new" "$APP_DIR/current"
+
+              pm2 startOrReload \
+                "$APP_DIR/ecosystem.config.cjs" \
+                --update-env || true
+
+            elif [ -f "$OLD_CONFIG" ]; then
+              rm -f "$APP_DIR/current"
+              cp "$OLD_CONFIG" "$APP_DIR/ecosystem.config.cjs"
+
+              pm2 startOrReload \
+                "$APP_DIR/ecosystem.config.cjs" \
+                --update-env || true
+            fi
+
+            pm2 logs morans-datax-buff --lines 50 --nostream || true
+          }
+
+          # Reload PM2.
+          if ! pm2 startOrReload \
+            "$APP_DIR/ecosystem.config.cjs" \
+            --update-env; then
+            rollback
+            exit 1
+          fi
+
+          # Verify the application and database.
+          HEALTHY=false
+
+          for i in $(seq 1 20); do
+            if curl --fail --silent \
+              http://127.0.0.1:3010/api/health/db; then
+              HEALTHY=true
+              break
+            fi
+
+            sleep 3
+          done
+
+          if [ "$HEALTHY" != "true" ]; then
+            rollback
+            exit 1
+          fi
+
+          echo "MORANS deployment successful"
+
+          # Keep the five newest releases.
+          find "$RELEASES" \
+            -mindepth 1 -maxdepth 1 -type d \
+            -printf '%T@ %p\n' |
+            sort -rn |
+            tail -n +6 |
+            cut -d' ' -f2- |
+            while IFS= read -r old_release; do
+              [ -n "$old_release" ] || continue
+              [ "$old_release" = "$RELEASE" ] || rm -rf -- "$old_release"
+            done
+
+          REMOTE
+

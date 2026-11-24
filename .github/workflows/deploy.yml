@@ -1,0 +1,71 @@
+
+name: Deploy MORANS Data X
+
+on:
+  push:
+    branches:
+      - master
+  workflow_dispatch:
+
+concurrency:
+  group: morans-production
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Test and deploy
+    runs-on: [self-hosted, linux, x64, morans]
+    timeout-minutes: 30
+
+    steps:
+      - name: Verify deployment environment
+        run: |
+          node --version
+          pnpm --version
+          pm2 --version
+
+      - name: Update production source
+        env:
+          DEPLOY_SHA: ${{ github.sha }}
+        run: |
+          APP_DIR="/home/server/Apis/morans-datax-buff"
+
+          test -f "$APP_DIR/.env.local" || {
+            echo "Production .env.local is missing"
+            exit 1
+          }
+
+          git -C "$APP_DIR" fetch origin master
+          git -C "$APP_DIR" reset --hard "$DEPLOY_SHA"
+
+      - name: Install dependencies
+        working-directory: /home/server/Apis/morans-datax-buff
+        run: pnpm install --frozen-lockfile
+
+      - name: Run tests
+        working-directory: /home/server/Apis/morans-datax-buff
+        run: pnpm test
+
+      - name: Build production application
+        working-directory: /home/server/Apis/morans-datax-buff
+        run: pnpm build
+
+      - name: Reload PM2 application
+        working-directory: /home/server/Apis/morans-datax-buff
+        run: pm2 startOrReload ecosystem.config.cjs --update-env
+
+      - name: Verify deployment
+        run: |
+          for i in $(seq 1 20); do
+            if curl --fail --silent \
+              http://127.0.0.1:3010/api/health/db; then
+              echo "Deployment health check passed"
+              exit 0
+            fi
+            sleep 3
+          done
+
+          echo "Deployment health check failed"
+          pm2 logs morans-datax-buff --lines 50 --nostream
+          exit 1
+
